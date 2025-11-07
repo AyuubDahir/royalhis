@@ -165,14 +165,90 @@ frappe.query_reports["Custom Account Receivable Summary"] = {
 			"fieldtype": "Check",
 			"hidden": 1
 		},
+		{
+			"fieldname": "page_length",
+			"label": __('Page Size'),
+			"fieldtype": "Select",
+			"options": ["20", "50", "100", "200"],
+			"default": "20"
+		},
+		{
+			"fieldname": "start",
+			"label": __('Start'),
+			"fieldtype": "Int",
+			"default": 0,
+			"hidden": 1
+		}
 	],
 
-	// onload: function(report) {
-	// 	report.page.add_inner_button(__("Accounts Receivable"), function() {
-	// 		var filters = report.get_values();
-	// 		frappe.set_route('query-report', 'Accounts Receivable', { company: filters.company });
-	// 	});
-	// }
+	onload: function(report) {
+		// Add navigation buttons
+		report.page.add_inner_button(__('Previous Page'), function() {
+			const filters = report.get_values();
+			const start = parseInt(filters.start || 0);
+			const page_length = parseInt(filters.page_length || 20);
+			
+			if (start >= page_length) {
+				frappe.query_report.set_filter_value('start', start - page_length);
+				frappe.query_report.refresh();
+			} else {
+				frappe.msgprint(__('You are on the first page'));
+			}
+		});
+		
+		report.page.add_inner_button(__('Next Page'), function() {
+			const filters = report.get_values();
+			const start = parseInt(filters.start || 0);
+			const page_length = parseInt(filters.page_length || 20);
+			
+			// Get total count from the response in __frappe_request_cache__
+			const total_count = frappe.query_report.last_response?.total_count || 
+						(frappe.last_response && frappe.last_response.message && 
+						 frappe.last_response.message.total_count) || 0;
+			
+			if (start + page_length < total_count) {
+				frappe.query_report.set_filter_value('start', start + page_length);
+				frappe.query_report.refresh();
+			} else {
+				frappe.msgprint(__('You are on the last page'));
+			}
+		});
+		
+		// Reset pagination when filters change
+		report.page.add_menu_item(__('Reset Pagination'), function() {
+			frappe.query_report.set_filter_value('start', 0);
+			frappe.query_report.refresh();
+		});
+		
+		// Add pagination info display
+		// Create or get pagination info element
+		let $pagination_info = $('#pagination-info');
+		if (!$pagination_info.length) {
+			$pagination_info = $('<div id="pagination-info" style="margin-left: 10px; display: inline-block; color: #6c7680;"></div>');
+			report.page.page_form.append($pagination_info);
+		}
+		
+		// Update pagination info on report refresh
+		report.page.wrapper.on('show', function() {
+			setTimeout(function() {
+				const filters = frappe.query_report.get_values();
+				const start = parseInt(filters.start || 0);
+				const page_length = parseInt(filters.page_length || 20);
+				const total_count = frappe.query_report.last_response?.total_count || 
+							(frappe.last_response && frappe.last_response.message && 
+							 frappe.last_response.message.total_count) || 0;
+				
+				if (total_count > 0) {
+					const current_page = Math.floor(start / page_length) + 1;
+					const total_pages = Math.ceil(total_count / page_length);
+					
+					$pagination_info.html(`Showing page ${current_page} of ${total_pages} (${total_count} records)`);
+				} else {
+					$pagination_info.html('No records found');
+				}
+			}, 500); // Short delay to ensure report data is loaded
+		});
+	}
 }
 
 erpnext.utils.add_dimensions('Account Receivable Summary', 9);

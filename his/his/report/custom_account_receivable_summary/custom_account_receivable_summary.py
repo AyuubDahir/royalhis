@@ -23,30 +23,67 @@ def execute(filters=None):
 
 class AccountReceivableSummary(ReceivablePayableReport):
 	def run(self, args):
+		# Import time for performance logging only
+		import time
+		start_time = time.time()
+		
+		# Basic setup
 		self.party_type = args.get("party_type")
 		self.party_naming_by = frappe.db.get_value(
 			args.get("naming_by")[0], None, args.get("naming_by")[1]
 		)
 		self.get_columns()
+		
+		# Get pagination parameters
+		self.page_length = 20  # Default page size
+		if hasattr(self.filters, 'page_length') and self.filters.page_length:
+			self.page_length = int(self.filters.page_length)
+		
+		self.start = 0
+		if hasattr(self.filters, 'start') and self.filters.start:
+			self.start = int(self.filters.start)
+
+		# Get data with pagination support
 		self.get_data(args)
+		
 		result = []
-		if self.filters.based_by == "Debtor":
-			sorted_data = sorted(self.data, key=lambda x: x['customer_group'])
-
-			# Group the sorted data by the 'customer_group' key
-			grouped_data = groupby(sorted_data, key=lambda x: x['customer_group'])
-
-			# Aggregate balances for each group
-			result = [{"customer_group": key , "receipt" : f"""<button style='padding: 3px; margin:-5px' class= 'btn btn-primary' onClick='receipt("" , "" , "{key}")'>Receipt</button>""", "outstanding": sum(item['outstanding']  for item in group)} for key, group in grouped_data]
+		if hasattr(self.filters, 'based_by') and self.filters.based_by == "Debtor":
+			# Optimized grouping using defaultdict for better performance
+			from collections import defaultdict
+			
+			# Use dictionary aggregation instead of groupby for better performance
+			aggregated = defaultdict(float)
+			for row in self.data:
+				if 'customer_group' in row and row['customer_group']:
+					aggregated[row['customer_group']] += row.get('outstanding', 0)
+			
+			# Create the result list in one go
+			result = [
+				{"customer_group": key, 
+				"receipt": f"<button style='padding:3px;margin:-5px' class='btn btn-primary' onClick='receipt(\"\", \"\", \"{key}\")'>Receipt</button>", 
+				"outstanding": value} 
+				for key, value in aggregated.items()
+			]
+			
+			# Sort once at the end
+			result.sort(key=lambda x: x["customer_group"])
+			
+			# Apply pagination to grouped data
+			total_count = len(result)
+			result = result[self.start:self.start + self.page_length]
+			
+			# Add pagination info to the result
+			frappe.response["total_count"] = total_count
+			frappe.response["page_count"] = total_count // self.page_length + (1 if total_count % self.page_length else 0)
 		else:
 			result = self.data
-		return self.columns,result
-
-	# def get_data(self, args):
-	# 	self.data = []
-
-	# 	self.receivables = ReceivablePayableReport(self.filters).run(args)[1]
+			
+		# Log performance metrics
+		exec_time = round(time.time() - start_time, 2)
+		if exec_time > 1.0:  # Only log if it took more than 1 second
+			frappe.log_error(f"Custom AR Summary took {exec_time}s to execute", "Performance Log")
 		
+		return self.columns, result
 
 	# 	self.get_party_total(args)
 
@@ -97,29 +134,58 @@ class AccountReceivableSummary(ReceivablePayableReport):
 
 	def get_data(self, args):
 		self.data = []
-
-		# Run base report logic
+		
+		# Run base report logic with optimized query
 		self.receivables = ReceivablePayableReport(self.filters).run(args)[1]
-
 		self.get_party_total(args)
+		
+		# Get count for pagination
+		total_parties = sum(1 for _, party_dict in iteritems(self.party_total) 
+						if round(party_dict.outstanding, 10) != 0)
+		
+		# Store total count for pagination
+		frappe.response["total_count"] = total_parties
+		frappe.response["page_count"] = total_parties // (self.page_length or 20) + \
+								(1 if total_parties % (self.page_length or 20) else 0)
 
-		# 🔄 Batch fetch responsible persons
+		# Get all parties for efficient batch fetching
+		parties = list(self.party_total.keys())
+		
+		# Early exit if no data
+		if not parties:
+			return
+
+		# 🚀 OPTIMIZED: Batch fetch responsible persons with IN clause
+		responsible_records = frappe.get_all(
+			"Customer Credit Limit", 
+			fields=["parent", "responsible"],
+			filters={"parent": ["in", parties]}
+		)
 		responsible_map = frappe._dict({
-			r.parent: r.responsible
-			for r in frappe.get_all("Customer Credit Limit", fields=["parent", "responsible"])
+			r.parent: r.responsible for r in responsible_records
 		})
 
-		# 🔄 Batch fetch mobile numbers
+		# 🚀 OPTIMIZED: Batch fetch patient info with IN clause
+		patient_records = frappe.get_all(
+			"Patient", 
+			fields=["customer", "mobile_no", "name"],
+			filters={"customer": ["in", parties]}
+		)
 		patient_info_map = frappe._dict({
 			r.customer: {"mobile_no": r.mobile_no, "name": r.name}
-			for r in frappe.get_all("Patient", fields=["customer", "mobile_no", "name"])
+			for r in patient_records
 		})
 
-		# 🔄 Optional: batch fetch customer names if using naming series
+		# Optional: batch fetch customer names with filtered query
+		party_name_map = {}
 		if self.party_naming_by == "Naming Series":
+			customer_records = frappe.get_all(
+				"Customer", 
+				fields=["name", "customer_name"],
+				filters={"name": ["in", parties]}
+			)
 			party_name_map = frappe._dict({
-				r.name: r.customer_name
-				for r in frappe.get_all("Customer", fields=["name", "customer_name"])
+				r.name: r.customer_name for r in customer_records
 			})
 
 		# ✅ Advanced payments - Using our custom implementation to avoid SQL errors
@@ -130,40 +196,50 @@ class AccountReceivableSummary(ReceivablePayableReport):
 			self.filters.company,
 		) or {}
 
-		# ✅ GL balance map
+		# ✅ GL balance map - load only if needed
+		gl_balance_map = {}
 		if self.filters.show_gl_balance:
 			gl_balance_map = get_gl_balance(self.filters.report_date)
-
-		for party, party_dict in iteritems(self.party_total):
-			if round(party_dict.outstanding, 10) == 0:
-				continue
-
-			row = frappe._dict()
-			row.party = party
-
-			# ✅ Faster: use pre-fetched customer name
-			if self.party_naming_by == "Naming Series":
-				row.party_name = party_name_map.get(party)
-
-			# ✅ Use batched values
-			row.resonsible = responsible_map.get(party)
-			# row.mobile_no = patient_info_map.get(party)
-			row.mobile_no = patient_info_map.get(party, {}).get("mobile_no")
-			row.patient = patient_info_map.get(party, {}).get("name")
-
-			# Inline buttons
-			row.receipt	  =f"""<button style='padding: 3px; margin:-5px' class= 'btn btn-primary' onClick='receipt("{party}" , "{party_dict.outstanding}")'>Receipt</button>"""
-			row.statement =f"""<button style='padding: 3px; margin:-5px' class= 'btn btn-primary' onClick='statement("{party}")'>Statements</button>"""
-
+		
+		# Use list comprehension first to filter data
+		eligible_parties = [(party, party_dict) for party, party_dict in iteritems(self.party_total) 
+							if round(party_dict.outstanding, 10) != 0]
+		
+		# Sort if needed
+		eligible_parties.sort(key=lambda x: x[0])  # Sort by party name for consistent results
+		
+		# Apply pagination to the eligible parties list
+		start = getattr(self, 'start', 0)
+		page_length = getattr(self, 'page_length', 20)
+		eligible_parties_paged = eligible_parties[start:start+page_length]
+		
+		# Pre-allocate memory for results
+		self.data = [None] * len(eligible_parties_paged)
+		
+		# Process only paginated data
+		for i, (party, party_dict) in enumerate(eligible_parties_paged):
+			# Create row with only necessary fields
+			row = frappe._dict({
+				"party": party,
+				"party_name": party_name_map.get(party) if self.party_naming_by == "Naming Series" else None,
+				"resonsible": responsible_map.get(party),
+				"mobile_no": patient_info_map.get(party, {}).get("mobile_no"),
+				"patient": patient_info_map.get(party, {}).get("name"),
+				"receipt": f"<button style='padding:3px;margin:-5px' class='btn btn-primary' onClick='receipt(\"{party}\", \"{party_dict.outstanding}\")'>Receipt</button>",
+				"statement": f"<button style='padding:3px;margin:-5px' class='btn btn-primary' onClick='statement(\"{party}\")'>Statements</button>",
+				"advance": party_advance_amount.get(party, 0)
+			})
+			
+			# Update with party dict values in one go
 			row.update(party_dict)
-			row.advance = party_advance_amount.get(party, 0)
-			_ = row.paid  # dummy read
 
+			# Conditionally add GL balance info
 			if self.filters.show_gl_balance:
 				row.gl_balance = gl_balance_map.get(party)
 				row.diff = flt(row.outstanding) - flt(row.gl_balance)
 
-			self.data.append(row)
+			# Direct assignment to pre-allocated list is faster than append
+			self.data[i] = row
 
 
 	def get_party_total(self, args):
@@ -300,36 +376,41 @@ class AccountReceivableSummary(ReceivablePayableReport):
 
 
 def get_gl_balance(report_date):
-	return frappe._dict(
-		frappe.db.get_all(
-			"GL Entry",
-			fields=["party", "sum(debit -  credit)"],
-			filters={"posting_date": ("<=", report_date), "is_cancelled": 0},
-			group_by="party",
-			as_list=1,
-		)
-	)
+	# Optimize query with index hints but no caching
+	result = frappe.db.sql("""
+		SELECT 
+			party, SUM(debit - credit) as balance
+		FROM `tabGL Entry` USE INDEX (posting_date)
+		WHERE 
+			posting_date <= %s 
+			AND is_cancelled = 0
+			AND party IS NOT NULL
+		GROUP BY party
+		HAVING balance != 0
+	""", report_date, as_list=1)
+	
+	return frappe._dict(result)
 
 def get_customer_advance_amount(party_type, report_date, show_future_payments=False, company=None):
 	"""
-	Custom implementation to get advance payment amounts specifically for Customers only.
-	This avoids the SQL error by not referencing Purchase Invoice's customer field
+	Optimized implementation to get advance payment amounts specifically for Customers only.
+	Uses optimized queries for better performance without caching.
 	"""
+	# Early exit for non-customer party types
 	if party_type != "Customer":
 		return {}
-		
-	party_advance_amount = {}
 	
-	# Get unallocated payment entry amounts
+	# Optimized query with index hints and no subqueries
 	order_list = frappe.db.sql("""
 		SELECT
 			pe.party, sum(pe.unallocated_amount) as amount
-		FROM `tabPayment Entry` as pe
+		FROM `tabPayment Entry` pe USE INDEX (posting_date, company)
 		WHERE
 			pe.party_type = %(party_type)s
 			AND pe.docstatus = 1
 			AND pe.company = %(company)s
 			AND pe.posting_date <= %(report_date)s
+			AND pe.unallocated_amount > 0
 		GROUP BY pe.party
 		HAVING amount > 0
 	""", {
@@ -338,11 +419,9 @@ def get_customer_advance_amount(party_type, report_date, show_future_payments=Fa
 		'report_date': report_date
 	}, as_dict=1)
 
-	# Process results
-	for d in order_list:
-		party_advance_amount.setdefault(d.party, d.amount)
-			
-	# Note: We've removed the Sales Invoice query that was looking for 'advance_amount'
-	# because this column doesn't exist in your ERPNext version
+	# Process results efficiently with a dict comprehension
+	party_advance_amount = frappe._dict({
+		d.party: d.amount for d in order_list if d.amount > 0
+	})
 			
 	return party_advance_amount
