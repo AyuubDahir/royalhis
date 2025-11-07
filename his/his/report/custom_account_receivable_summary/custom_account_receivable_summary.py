@@ -122,11 +122,11 @@ class AccountReceivableSummary(ReceivablePayableReport):
 				for r in frappe.get_all("Customer", fields=["name", "customer_name"])
 			})
 
-		# ✅ Advanced payments
-		party_advance_amount = get_partywise_advanced_payment_amount(
+		# ✅ Advanced payments - Using our custom implementation to avoid SQL errors
+		party_advance_amount = get_customer_advance_amount(
 			self.party_type,
 			self.filters.report_date,
-			self.filters.show_future_payments,
+			cint(self.filters.show_future_payments) if hasattr(self.filters, 'show_future_payments') else 0,
 			self.filters.company,
 		) or {}
 
@@ -309,3 +309,58 @@ def get_gl_balance(report_date):
 			as_list=1,
 		)
 	)
+
+def get_customer_advance_amount(party_type, report_date, show_future_payments=False, company=None):
+	"""
+	Custom implementation to get advance payment amounts specifically for Customers only.
+	This avoids the SQL error by not referencing Purchase Invoice's customer field
+	"""
+	if party_type != "Customer":
+		return {}
+		
+	party_advance_amount = {}
+	
+	order_list = frappe.db.sql("""
+		SELECT
+			pe.party, sum(pe.unallocated_amount) as amount
+		FROM `tabPayment Entry` as pe
+		WHERE
+			pe.party_type = %(party_type)s
+			AND pe.docstatus = 1
+			AND pe.company = %(company)s
+			AND pe.posting_date <= %(report_date)s
+		GROUP BY pe.party
+		HAVING amount > 0
+	""", {
+		'party_type': party_type,
+		'company': company,
+		'report_date': report_date
+	}, as_dict=1)
+
+	for d in order_list:
+		party_advance_amount.setdefault(d.party, d.amount)
+
+	# Add amounts from sales invoices with advances
+	invoice_advance = frappe.db.sql("""
+		SELECT
+			customer as party, sum(advance_amount) as amount
+		FROM `tabSales Invoice`
+		WHERE
+			docstatus = 1
+			AND company = %(company)s
+			AND posting_date <= %(report_date)s
+			AND advance_amount > 0
+		GROUP BY customer
+		HAVING amount > 0
+	""", {
+		'company': company,
+		'report_date': report_date
+	}, as_dict=1)
+
+	for d in invoice_advance:
+		if d.party in party_advance_amount:
+			party_advance_amount[d.party] += d.amount
+		else:
+			party_advance_amount[d.party] = d.amount
+			
+	return party_advance_amount
