@@ -320,6 +320,7 @@ def get_customer_advance_amount(party_type, report_date, show_future_payments=Fa
 		
 	party_advance_amount = {}
 	
+	# Get unallocated payment entry amounts
 	order_list = frappe.db.sql("""
 		SELECT
 			pe.party, sum(pe.unallocated_amount) as amount
@@ -337,30 +338,11 @@ def get_customer_advance_amount(party_type, report_date, show_future_payments=Fa
 		'report_date': report_date
 	}, as_dict=1)
 
+	# Process results
 	for d in order_list:
 		party_advance_amount.setdefault(d.party, d.amount)
-
-	# Add amounts from sales invoices with advances
-	invoice_advance = frappe.db.sql("""
-		SELECT
-			customer as party, sum(advance_amount) as amount
-		FROM `tabSales Invoice`
-		WHERE
-			docstatus = 1
-			AND company = %(company)s
-			AND posting_date <= %(report_date)s
-			AND advance_amount > 0
-		GROUP BY customer
-		HAVING amount > 0
-	""", {
-		'company': company,
-		'report_date': report_date
-	}, as_dict=1)
-
-	for d in invoice_advance:
-		if d.party in party_advance_amount:
-			party_advance_amount[d.party] += d.amount
-		else:
-			party_advance_amount[d.party] = d.amount
+			
+	# Note: We've removed the Sales Invoice query that was looking for 'advance_amount'
+	# because this column doesn't exist in your ERPNext version
 			
 	return party_advance_amount
