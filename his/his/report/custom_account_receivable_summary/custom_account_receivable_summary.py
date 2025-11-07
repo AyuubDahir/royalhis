@@ -13,6 +13,10 @@ from itertools import groupby
 
 
 def execute(filters=None):
+	# Ensure the report runs in the foreground and is not treated as a background report
+	if hasattr(filters, 'run_in_background'):
+		filters.run_in_background = False
+	
 	args = {
 		"party_type": "Customer",
 		"naming_by": ["Selling Settings", "cust_master_name"],
@@ -83,7 +87,16 @@ class AccountReceivableSummary(ReceivablePayableReport):
 		if exec_time > 1.0:  # Only log if it took more than 1 second
 			frappe.log_error(f"Custom AR Summary took {exec_time}s to execute", "Performance Log")
 		
-		return self.columns, result
+		# Add pagination metadata to result
+		if hasattr(self, 'total_count'):
+			# Add pagination metadata to the message instead of response object
+			return self.columns, result, None, None, {
+				'total_count': self.total_count,
+				'page_count': self.page_count,
+				'current_page': (self.start // self.page_length) + 1 if self.page_length else 1
+			}
+		else:
+			return self.columns, result
 
 	# 	self.get_party_total(args)
 
@@ -143,10 +156,10 @@ class AccountReceivableSummary(ReceivablePayableReport):
 		total_parties = sum(1 for _, party_dict in iteritems(self.party_total) 
 						if round(party_dict.outstanding, 10) != 0)
 		
-		# Store total count for pagination
-		frappe.response["total_count"] = total_parties
-		frappe.response["page_count"] = total_parties // (self.page_length or 20) + \
-								(1 if total_parties % (self.page_length or 20) else 0)
+		# Store total count as a class attribute instead of in frappe.response
+		self.total_count = total_parties
+		self.page_count = total_parties // (self.page_length or 20) + \
+						(1 if total_parties % (self.page_length or 20) else 0)
 
 		# Get all parties for efficient batch fetching
 		parties = list(self.party_total.keys())

@@ -202,9 +202,16 @@ frappe.query_reports["Custom Account Receivable Summary"] = {
 			const page_length = parseInt(filters.page_length || 20);
 			
 			// Get total count from the response in __frappe_request_cache__
-			const total_count = frappe.query_report.last_response?.total_count || 
-						(frappe.last_response && frappe.last_response.message && 
-						 frappe.last_response.message.total_count) || 0;
+			// Get pagination info from custom_info (5th element in the response array)
+			let total_count = 0;
+			let current_page = 1;
+			let page_count = 1;
+			
+			if (frappe.query_report.report_settings && frappe.query_report.report_settings.custom_info) {
+				total_count = frappe.query_report.report_settings.custom_info.total_count || 0;
+				current_page = frappe.query_report.report_settings.custom_info.current_page || 1;
+				page_count = frappe.query_report.report_settings.custom_info.page_count || 1;
+			}
 			
 			if (start + page_length < total_count) {
 				frappe.query_report.set_filter_value('start', start + page_length);
@@ -234,19 +241,29 @@ frappe.query_reports["Custom Account Receivable Summary"] = {
 				const filters = frappe.query_report.get_values();
 				const start = parseInt(filters.start || 0);
 				const page_length = parseInt(filters.page_length || 20);
-				const total_count = frappe.query_report.last_response?.total_count || 
-							(frappe.last_response && frappe.last_response.message && 
-							 frappe.last_response.message.total_count) || 0;
+				
+				// Get pagination info from custom_info
+				let total_count = 0;
+				let current_page = 1;
+				let total_pages = 1;
+				
+				if (frappe.query_report.report_settings && frappe.query_report.report_settings.custom_info) {
+					total_count = frappe.query_report.report_settings.custom_info.total_count || 0;
+					current_page = frappe.query_report.report_settings.custom_info.current_page || 1;
+					total_pages = frappe.query_report.report_settings.custom_info.page_count || 1;
+				} else {
+					// Fallback to calculated values
+					current_page = Math.floor(start / page_length) + 1;
+				}
 				
 				if (total_count > 0) {
-					const current_page = Math.floor(start / page_length) + 1;
-					const total_pages = Math.ceil(total_count / page_length);
-					
 					$pagination_info.html(`Showing page ${current_page} of ${total_pages} (${total_count} records)`);
+					$pagination_info.show();
 				} else {
 					$pagination_info.html('No records found');
+					$pagination_info.show();
 				}
-			}, 500); // Short delay to ensure report data is loaded
+			}, 300); // Short delay to ensure report data is loaded
 		});
 	}
 }
