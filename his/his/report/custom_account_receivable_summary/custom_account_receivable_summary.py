@@ -376,11 +376,11 @@ class AccountReceivableSummary(ReceivablePayableReport):
 
 
 def get_gl_balance(report_date):
-	# Optimize query with index hints but no caching
+	# Optimize query without problematic index hints
 	result = frappe.db.sql("""
 		SELECT 
 			party, SUM(debit - credit) as balance
-		FROM `tabGL Entry` USE INDEX (posting_date)
+		FROM `tabGL Entry`
 		WHERE 
 			posting_date <= %s 
 			AND is_cancelled = 0
@@ -400,11 +400,11 @@ def get_customer_advance_amount(party_type, report_date, show_future_payments=Fa
 	if party_type != "Customer":
 		return {}
 	
-	# Optimized query with index hints and no subqueries
+	# Optimized query without problematic index hints
 	order_list = frappe.db.sql("""
 		SELECT
 			pe.party, sum(pe.unallocated_amount) as amount
-		FROM `tabPayment Entry` pe USE INDEX (posting_date, company)
+		FROM `tabPayment Entry` pe
 		WHERE
 			pe.party_type = %(party_type)s
 			AND pe.docstatus = 1
